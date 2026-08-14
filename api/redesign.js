@@ -1,17 +1,20 @@
-// api/redesign.js
-// Vercel serverless function: receives a room photo + style, asks OpenAI
-// to redesign it while preserving the room's structure, returns the result.
-//
-// Deploy: connect this repo to Vercel, add OPENAI_API_KEY as an env var,
-// and set ALLOWED_ORIGIN to your storefront domain (e.g. https://modernspacegallery.com).
+const { applyCors } = require('../lib/cors');
+const { getRemaining, recordGeneration, FREE_LIMIT, AI_PLUS_LIMIT } = require('../lib/usage-store');
+const { checkRateLimit } = require('../lib/rate-limit');
+const { getEntitlement } = require('../lib/entitlement');
 
-export const config = {
-  api: {
-    bodyParser: {
-      sizeLimit: '8mb', // room photos can be a few MB; adjust if needed
-    },
-  },
-};
+// POST /api/redesign  { image, style, roomType, customerId }
+// Matches the contract expected by assets/studio-room-designer.js:
+//   -> 200 { image: <data URL>, remaining: <number> }
+//   -> 4xx/5xx { error: <string>, limitReached?: true }
+//
+// Uses OpenAI's image edit endpoint (gpt-image-1) directly. The theme already
+// compresses photos client-side to stay under Vercel's fixed request body
+// limit for serverless functions, so the image goes straight from the
+// browser to this function to OpenAI — no separate upload-to-blob-storage
+// step needed.
+
+const MAX_BYTES = 6 * 1024 * 1024; // safety cap, in addition to client-side compression
 
 const STYLE_PROMPTS = {
   modern: 'clean lines, neutral colors, minimalist furniture, uncluttered surfaces',
@@ -28,88 +31,107 @@ const STYLE_PROMPTS = {
   bohemian: 'eclectic layered patterns, vibrant colors, natural textures, plants, artistic accents',
 };
 
-export default async function handler(req, res) {
-  const allowedOrigin = process.env.ALLOWED_ORIGIN || '*';
-  res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+async function generateRedesign({ buffer, mimeType, style, roomType }) {
+  const styleDescription = STYLE_PROMPTS[style] || STYLE_PROMPTS.modern;
+  const roomLabel = roomType ? String(roomType).slice(0, 40) : 'room';
+  const prompt =
+    `Redesign this ${roomLabel} in a ${style.replace(/-/g, ' ')} style: ${styleDescription}. ` +
+    `IMPORTANT: preserve the room's existing architecture exactly — keep the same walls, windows, doors, ` +
+    `ceiling height, and camera angle. Only change the furniture, decor, colors, materials, and lighting fixtures. ` +
+    `Do not add or remove windows or doors. Do not change the room's layout or perspective.`;
 
-  if (req.method === 'OPTIONS') {
-    res.status(204).end();
+  const form = new FormData();
+  form.append('model', 'gpt-image-1');
+  form.append('prompt', prompt);
+  form.append('size', '1024x1024');
+  form.append('n', '1');
+  form.append('image', new Blob([buffer], { type: mimeType }), 'room.png');
+
+  const openaiRes = await fetch('https://api.openai.com/v1/images/edits', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+    },
+    body: form,
+  });
+
+  if (!openaiRes.ok) {
+    const errText = await openaiRes.text();
+    console.error('OpenAI error:', openaiRes.status, errText);
+    throw Object.assign(new Error('The design service is temporarily unavailable. Please try again.'), {
+      statusCode: 502,
+    });
+  }
+
+  const data = await openaiRes.json();
+  const resultB64 = data && data.data && data.data[0] && data.data[0].b64_json;
+  if (!resultB64) {
+    throw Object.assign(new Error('No image was returned. Please try again.'), { statusCode: 502 });
+  }
+
+  return `data:image/png;base64,${resultB64}`;
+}
+
+module.exports = async function handler(req, res) {
+  if (applyCors(req, res)) return;
+
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed.' });
     return;
   }
 
-  if (req.method !== 'POST') {
-    res.status(405).json({ error: 'Method not allowed' });
+  const { image, style, roomType, customerId } = req.body || {};
+
+  const cleanCustomerId = String(customerId || '').trim();
+  if (!/^[0-9]{1,30}$/.test(cleanCustomerId)) {
+    res.status(400).json({ error: 'Invalid customerId.' });
+    return;
+  }
+  if (!image || typeof image !== 'string' || !image.startsWith('data:image/')) {
+    res.status(400).json({ error: 'Missing or invalid image.' });
+    return;
+  }
+  if (!style || !STYLE_PROMPTS[style]) {
+    res.status(400).json({ error: 'Missing or unrecognized style.' });
+    return;
+  }
+
+  const allowed = await checkRateLimit(req, 'redesign');
+  if (!allowed) {
+    res.status(429).json({ error: 'Too many requests. Please try again shortly.' });
     return;
   }
 
   try {
-    const { image, style, roomType } = req.body || {};
+    const tier = await getEntitlement(cleanCustomerId);
+    const limit = tier === 'ai_plus' ? AI_PLUS_LIMIT : FREE_LIMIT;
 
-    if (!image || typeof image !== 'string' || !image.startsWith('data:image/')) {
-      res.status(400).json({ error: 'Missing or invalid "image" (expected a data URL).' });
-      return;
-    }
-    if (!style || !STYLE_PROMPTS[style]) {
-      res.status(400).json({ error: 'Missing or unrecognized "style".' });
+    const remainingBefore = await getRemaining(cleanCustomerId, limit);
+    if (remainingBefore <= 0) {
+      res.status(403).json({ error: "You've used your free designs.", limitReached: true });
       return;
     }
 
-    // Convert the data URL to a Blob for the multipart upload.
     const [meta, base64Data] = image.split(',');
-    const mimeMatch = meta.match(/data:(.*);base64/);
+    const mimeMatch = /data:(.*);base64/.exec(meta);
     const mimeType = mimeMatch ? mimeMatch[1] : 'image/png';
     const buffer = Buffer.from(base64Data, 'base64');
-
-    const MAX_BYTES = 6 * 1024 * 1024; // 6MB safety cap
     if (buffer.length > MAX_BYTES) {
       res.status(400).json({ error: 'Image is too large. Please upload a photo under 6MB.' });
       return;
     }
 
-    const styleDescription = STYLE_PROMPTS[style];
-    const roomLabel = roomType ? String(roomType).slice(0, 40) : 'room';
+    const resultImage = await generateRedesign({ buffer, mimeType, style, roomType });
+    const remaining = await recordGeneration(cleanCustomerId, limit);
 
-    const prompt =
-      `Redesign this ${roomLabel} in a ${style.replace(/-/g, ' ')} style: ${styleDescription}. ` +
-      `IMPORTANT: preserve the room's existing architecture exactly \u2014 keep the same walls, windows, doors, ` +
-      `ceiling height, and camera angle. Only change the furniture, decor, colors, materials, and lighting fixtures. ` +
-      `Do not add or remove windows or doors. Do not change the room's layout or perspective.`;
-
-    const form = new FormData();
-    form.append('model', 'gpt-image-1');
-    form.append('prompt', prompt);
-    form.append('size', '1024x1024');
-    form.append('n', '1');
-    form.append('image', new Blob([buffer], { type: mimeType }), 'room.png');
-
-    const openaiRes = await fetch('https://api.openai.com/v1/images/edits', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      },
-      body: form,
-    });
-
-    if (!openaiRes.ok) {
-      const errText = await openaiRes.text();
-      console.error('OpenAI error:', openaiRes.status, errText);
-      res.status(502).json({ error: 'The design service is temporarily unavailable. Please try again.' });
-      return;
-    }
-
-    const data = await openaiRes.json();
-    const resultB64 = data?.data?.[0]?.b64_json;
-
-    if (!resultB64) {
-      res.status(502).json({ error: 'No image was returned. Please try again.' });
-      return;
-    }
-
-    res.status(200).json({ image: `data:image/png;base64,${resultB64}` });
+    res.status(200).json({ image: resultImage, remaining, tier });
   } catch (err) {
-    console.error('Unexpected error:', err);
-    res.status(500).json({ error: 'Something went wrong. Please try again.' });
+    console.error('redesign failed', err);
+    const statusCode = err.statusCode && err.statusCode >= 400 && err.statusCode < 600 ? err.statusCode : 500;
+    const safeMessage =
+      statusCode === 422 || statusCode === 400
+        ? err.message
+        : 'Something went wrong generating your design. Please try again.';
+    res.status(statusCode).json({ error: safeMessage });
   }
-}
+};
