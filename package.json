@@ -5,5 +5,9 @@
   "description": "Vercel serverless function that proxies room redesign requests to OpenAI, keeping the API key server-side.",
   "engines": {
     "node": ">=18"
+  },
+  "dependencies": {
+    "@vercel/blob": "^2.8.0",
+    "@vercel/kv": "^3.0.0"
   }
 }
