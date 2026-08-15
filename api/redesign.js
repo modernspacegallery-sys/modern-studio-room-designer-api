@@ -3,6 +3,7 @@ const { getRemaining, recordGeneration, FREE_LIMIT, AI_PLUS_LIMIT } = require('.
 const { checkRateLimit } = require('../lib/rate-limit');
 const { getEntitlement } = require('../lib/entitlement');
 const { customerExists } = require('../lib/customer-verify');
+const { recordToolUse } = require('../lib/tool-usage');
 
 // POST /api/redesign  { image, style, roomType, customerId }
 // Matches the contract expected by assets/studio-room-designer.js:
@@ -130,6 +131,7 @@ module.exports = async function handler(req, res) {
 
     const resultImage = await generateRedesign({ buffer, mimeType, style, roomType });
     const remaining = await recordGeneration(cleanCustomerId, limit);
+    recordToolUse('room-designer').catch(() => {}); // best-effort, never blocks the response
 
     res.status(200).json({ image: resultImage, remaining, tier });
   } catch (err) {
