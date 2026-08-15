@@ -2,6 +2,7 @@ const { applyCors } = require('../lib/cors');
 const { getRemaining, recordGeneration, FREE_LIMIT, AI_PLUS_LIMIT } = require('../lib/usage-store');
 const { checkRateLimit } = require('../lib/rate-limit');
 const { getEntitlement } = require('../lib/entitlement');
+const { customerExists } = require('../lib/customer-verify');
 
 // POST /api/redesign  { image, style, roomType, customerId }
 // Matches the contract expected by assets/studio-room-designer.js:
@@ -99,6 +100,12 @@ module.exports = async function handler(req, res) {
   const allowed = await checkRateLimit(req, 'redesign');
   if (!allowed) {
     res.status(429).json({ error: 'Too many requests. Please try again shortly.' });
+    return;
+  }
+
+  const isRealCustomer = await customerExists(cleanCustomerId);
+  if (!isRealCustomer) {
+    res.status(400).json({ error: 'Invalid customerId.' });
     return;
   }
 
