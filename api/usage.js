@@ -1,15 +1,12 @@
 const { applyCors } = require('../lib/cors');
-const { getRemaining, FREE_LIMIT, AI_PLUS_LIMIT } = require('../lib/usage-store');
+const { getRemaining, FREE_LIMIT } = require('../lib/usage-store');
+const { getCreditsRemaining, computePeriodStart, AI_PLUS_MONTHLY_CREDITS } = require('../lib/credits');
 const { checkRateLimit } = require('../lib/rate-limit');
 const { getEntitlement } = require('../lib/entitlement');
 const { verifyCustomerToken } = require('../lib/verify-customer-token');
 
 // GET /api/usage?customerId=123456789&issuedAt=...&token=...
-// Matches the contract expected by assets/studio-room-designer.js.
-//
-// customerId is no longer trusted on its own — issuedAt + token are a
-// signature Shopify computed server-side (via Liquid's hmac_sha256 filter)
-// at page-render time. See lib/verify-customer-token.js.
+// -> { remaining, tier, total? }
 module.exports = async function handler(req, res) {
   if (applyCors(req, res)) return;
 
@@ -37,10 +34,17 @@ module.exports = async function handler(req, res) {
   }
 
   try {
-    const tier = await getEntitlement(cleanCustomerId);
-    const limit = tier === 'ai_plus' ? AI_PLUS_LIMIT : FREE_LIMIT;
-    const remaining = await getRemaining(cleanCustomerId, limit);
-    res.status(200).json({ remaining, tier });
+    const { tier, periodAnchor } = await getEntitlement(cleanCustomerId);
+
+    if (tier === 'ai_plus' && periodAnchor) {
+      const periodStart = computePeriodStart(periodAnchor);
+      const remaining = await getCreditsRemaining(cleanCustomerId, periodStart);
+      res.status(200).json({ remaining, tier, total: AI_PLUS_MONTHLY_CREDITS });
+      return;
+    }
+
+    const remaining = await getRemaining(cleanCustomerId, FREE_LIMIT);
+    res.status(200).json({ remaining, tier: 'free' });
   } catch (err) {
     console.error('usage lookup failed', err);
     res.status(500).json({ error: 'Could not check usage right now.' });
