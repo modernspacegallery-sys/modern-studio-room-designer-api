@@ -2,13 +2,20 @@ const { applyCors } = require('../lib/cors');
 const { getRemaining, recordGeneration, FREE_LIMIT, AI_PLUS_LIMIT } = require('../lib/usage-store');
 const { checkRateLimit } = require('../lib/rate-limit');
 const { getEntitlement } = require('../lib/entitlement');
-const { customerExists } = require('../lib/customer-verify');
+const { verifyCustomerToken } = require('../lib/verify-customer-token');
 const { recordToolUse } = require('../lib/tool-usage');
 
-// POST /api/redesign  { image, style, roomType, customerId }
+// POST /api/redesign  { image, style, roomType, customerId, issuedAt, token }
 // Matches the contract expected by assets/studio-room-designer.js:
 //   -> 200 { image: <data URL>, remaining: <number> }
 //   -> 4xx/5xx { error: <string>, limitReached?: true }
+//
+// customerId is no longer trusted on its own — issuedAt + token are a
+// signature Shopify computed server-side (via Liquid's hmac_sha256 filter)
+// at page-render time, over customerId + issuedAt, using a secret that never
+// reaches the browser. A visitor can edit customerId in devtools all they
+// want; without a matching valid signature for THAT id, this rejects the
+// request. See lib/verify-customer-token.js for the verification logic.
 //
 // Uses OpenAI's image edit endpoint (gpt-image-1) directly. The theme already
 // compresses photos client-side to stay under Vercel's fixed request body
@@ -82,7 +89,7 @@ module.exports = async function handler(req, res) {
     return;
   }
 
-  const { image, style, roomType, customerId } = req.body || {};
+  const { image, style, roomType, customerId, issuedAt, token } = req.body || {};
 
   const cleanCustomerId = String(customerId || '').trim();
   if (!/^[0-9]{1,30}$/.test(cleanCustomerId)) {
@@ -104,9 +111,8 @@ module.exports = async function handler(req, res) {
     return;
   }
 
-  const isRealCustomer = await customerExists(cleanCustomerId);
-  if (!isRealCustomer) {
-    res.status(400).json({ error: 'Invalid customerId.' });
+  if (!verifyCustomerToken(cleanCustomerId, issuedAt, token)) {
+    res.status(401).json({ error: 'Could not verify your session. Please refresh the page and try again.' });
     return;
   }
 
