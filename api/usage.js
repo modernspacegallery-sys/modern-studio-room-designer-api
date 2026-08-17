@@ -1,12 +1,13 @@
 const { applyCors } = require('../lib/cors');
 const { getRemaining, FREE_LIMIT } = require('../lib/usage-store');
-const { getCreditsRemaining, computePeriodStart, AI_PLUS_MONTHLY_CREDITS } = require('../lib/credits');
+const { getCreditsRemaining, computePeriodStart, computeNextReset, AI_PLUS_MONTHLY_CREDITS } = require('../lib/credits');
 const { checkRateLimit } = require('../lib/rate-limit');
 const { getEntitlement } = require('../lib/entitlement');
 const { verifyCustomerToken } = require('../lib/verify-customer-token');
 
 // GET /api/usage?customerId=123456789&issuedAt=...&token=...
-// -> { remaining, tier, total? }
+// -> { remaining, tier } for free tier
+// -> { remaining, tier, total, renewsOn } for AI+
 module.exports = async function handler(req, res) {
   if (applyCors(req, res)) return;
 
@@ -39,7 +40,12 @@ module.exports = async function handler(req, res) {
     if (tier === 'ai_plus' && periodAnchor) {
       const periodStart = computePeriodStart(periodAnchor);
       const remaining = await getCreditsRemaining(cleanCustomerId, periodStart);
-      res.status(200).json({ remaining, tier, total: AI_PLUS_MONTHLY_CREDITS });
+      res.status(200).json({
+        remaining,
+        tier,
+        total: AI_PLUS_MONTHLY_CREDITS,
+        renewsOn: computeNextReset(periodStart),
+      });
       return;
     }
 
