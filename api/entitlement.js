@@ -1,9 +1,10 @@
 const { applyCors } = require('../lib/cors');
 const { getEntitlement } = require('../lib/entitlement');
 const { checkRateLimit } = require('../lib/rate-limit');
+const { getCreditsRemaining, computePeriodStart, AI_PLUS_MONTHLY_CREDITS } = require('../lib/credits');
 
 // GET /api/entitlement?customerId=123456789
-// -> { tier: 'free' | 'ai_plus' }
+// -> { tier: 'free' } or { tier: 'ai_plus', credits: { remaining, total, periodStart } }
 module.exports = async function handler(req, res) {
   if (applyCors(req, res)) return;
 
@@ -25,7 +26,13 @@ module.exports = async function handler(req, res) {
   }
 
   try {
-    const tier = await getEntitlement(customerId);
+    const { tier, periodAnchor } = await getEntitlement(customerId);
+    if (tier === 'ai_plus' && periodAnchor) {
+      const periodStart = computePeriodStart(periodAnchor);
+      const remaining = await getCreditsRemaining(customerId, periodStart);
+      res.status(200).json({ tier, credits: { remaining, total: AI_PLUS_MONTHLY_CREDITS, periodStart } });
+      return;
+    }
     res.status(200).json({ tier });
   } catch (err) {
     console.error('entitlement check failed', err);
