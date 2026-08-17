@@ -1,29 +1,21 @@
 const { applyCors } = require('../lib/cors');
-const { getRemaining, recordGeneration, FREE_LIMIT, AI_PLUS_LIMIT } = require('../lib/usage-store');
+const { getRemaining, recordGeneration, FREE_LIMIT } = require('../lib/usage-store');
 const { checkRateLimit } = require('../lib/rate-limit');
 const { getEntitlement } = require('../lib/entitlement');
 const { verifyCustomerToken } = require('../lib/verify-customer-token');
 const { recordToolUse } = require('../lib/tool-usage');
+const { getCreditsRemaining, spendCredits, computePeriodStart, CREDIT_COSTS } = require('../lib/credits');
 
 // POST /api/redesign  { image, style, roomType, customerId, issuedAt, token }
-// Matches the contract expected by assets/studio-room-designer.js:
-//   -> 200 { image: <data URL>, remaining: <number> }
-//   -> 4xx/5xx { error: <string>, limitReached?: true }
+// -> 200 { image: <data URL>, remaining, tier }
+// -> 4xx/5xx { error, limitReached?: true }
 //
-// customerId is no longer trusted on its own — issuedAt + token are a
-// signature Shopify computed server-side (via Liquid's hmac_sha256 filter)
-// at page-render time, over customerId + issuedAt, using a secret that never
-// reaches the browser. A visitor can edit customerId in devtools all they
-// want; without a matching valid signature for THAT id, this rejects the
-// request. See lib/verify-customer-token.js for the verification logic.
-//
-// Uses OpenAI's image edit endpoint (gpt-image-1) directly. The theme already
-// compresses photos client-side to stay under Vercel's fixed request body
-// limit for serverless functions, so the image goes straight from the
-// browser to this function to OpenAI — no separate upload-to-blob-storage
-// step needed.
+// Free-tier customers spend from the simple lifetime counter in
+// usage-store.js. AI+ subscribers spend from their monthly credit balance —
+// this operation costs CREDIT_COSTS.standard_redesign credits (1 by
+// default), configurable via env var without touching this file.
 
-const MAX_BYTES = 6 * 1024 * 1024; // safety cap, in addition to client-side compression
+const MAX_BYTES = 6 * 1024 * 1024;
 
 const STYLE_PROMPTS = {
   modern: 'clean lines, neutral colors, minimalist furniture, uncluttered surfaces',
@@ -58,9 +50,7 @@ async function generateRedesign({ buffer, mimeType, style, roomType }) {
 
   const openaiRes = await fetch('https://api.openai.com/v1/images/edits', {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-    },
+    headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
     body: form,
   });
 
@@ -117,12 +107,21 @@ module.exports = async function handler(req, res) {
   }
 
   try {
-    const tier = await getEntitlement(cleanCustomerId);
-    const limit = tier === 'ai_plus' ? AI_PLUS_LIMIT : FREE_LIMIT;
+    const { tier, periodAnchor } = await getEntitlement(cleanCustomerId);
+    const isAiPlus = tier === 'ai_plus' && !!periodAnchor;
+    const periodStart = isAiPlus ? computePeriodStart(periodAnchor) : null;
 
-    const remainingBefore = await getRemaining(cleanCustomerId, limit);
-    if (remainingBefore <= 0) {
-      res.status(403).json({ error: "You've used your free designs.", limitReached: true });
+    // Check BEFORE generating — never call OpenAI for a request we're going to reject anyway.
+    const remainingBefore = isAiPlus
+      ? await getCreditsRemaining(cleanCustomerId, periodStart)
+      : await getRemaining(cleanCustomerId, FREE_LIMIT);
+    const costOfThisOperation = isAiPlus ? CREDIT_COSTS.standard_redesign : 0;
+
+    if (isAiPlus ? remainingBefore < costOfThisOperation : remainingBefore <= 0) {
+      res.status(403).json({
+        error: isAiPlus ? "You're out of AI Design Credits for this billing period." : "You've used your free designs.",
+        limitReached: true,
+      });
       return;
     }
 
@@ -136,17 +135,23 @@ module.exports = async function handler(req, res) {
     }
 
     const resultImage = await generateRedesign({ buffer, mimeType, style, roomType });
-    const remaining = await recordGeneration(cleanCustomerId, limit);
-    recordToolUse('room-designer').catch(() => {}); // best-effort, never blocks the response
+
+    let remaining;
+    if (isAiPlus) {
+      const spendResult = await spendCredits(cleanCustomerId, periodStart, 'standard_redesign');
+      remaining = spendResult.remaining;
+    } else {
+      remaining = await recordGeneration(cleanCustomerId, FREE_LIMIT);
+    }
+
+    recordToolUse('room-designer').catch(() => {});
 
     res.status(200).json({ image: resultImage, remaining, tier });
   } catch (err) {
     console.error('redesign failed', err);
     const statusCode = err.statusCode && err.statusCode >= 400 && err.statusCode < 600 ? err.statusCode : 500;
     const safeMessage =
-      statusCode === 422 || statusCode === 400
-        ? err.message
-        : 'Something went wrong generating your design. Please try again.';
+      statusCode === 422 || statusCode === 400 ? err.message : 'Something went wrong generating your design. Please try again.';
     res.status(statusCode).json({ error: safeMessage });
   }
 };
