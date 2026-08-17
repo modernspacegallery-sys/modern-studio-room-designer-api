@@ -4,11 +4,11 @@ const { checkRateLimit } = require('../lib/rate-limit');
 const { getEntitlement } = require('../lib/entitlement');
 const { verifyCustomerToken } = require('../lib/verify-customer-token');
 const { recordToolUse } = require('../lib/tool-usage');
-const { getCreditsRemaining, spendCredits, computePeriodStart, CREDIT_COSTS } = require('../lib/credits');
+const { getCreditsRemaining, spendCredits, computePeriodStart, computeNextReset, CREDIT_COSTS } = require('../lib/credits');
 
 // POST /api/redesign  { image, style, roomType, customerId, issuedAt, token }
 // -> 200 { image: <data URL>, remaining, tier }
-// -> 4xx/5xx { error, limitReached?: true }
+// -> 4xx/5xx { error, limitReached?: true, tier?, renewsOn? }
 //
 // Free-tier customers spend from the simple lifetime counter in
 // usage-store.js. AI+ subscribers spend from their monthly credit balance —
@@ -121,6 +121,8 @@ module.exports = async function handler(req, res) {
       res.status(403).json({
         error: isAiPlus ? "You're out of AI Design Credits for this billing period." : "You've used your free designs.",
         limitReached: true,
+        tier,
+        renewsOn: isAiPlus ? computeNextReset(periodStart) : undefined,
       });
       return;
     }
