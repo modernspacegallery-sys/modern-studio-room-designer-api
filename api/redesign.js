@@ -5,15 +5,16 @@ const { getEntitlement } = require('../lib/entitlement');
 const { verifyCustomerToken } = require('../lib/verify-customer-token');
 const { recordToolUse } = require('../lib/tool-usage');
 const { getCreditsRemaining, spendCredits, computePeriodStart, computeNextReset, CREDIT_COSTS } = require('../lib/credits');
+const { isIpOverFreeLimit, recordIpFreeUse } = require('../lib/ip-abuse-guard');
 
 // POST /api/redesign  { image, style, roomType, customerId, issuedAt, token }
 // -> 200 { image: <data URL>, remaining, tier }
 // -> 4xx/5xx { error, limitReached?: true, tier?, renewsOn? }
 //
 // Free-tier customers spend from the simple lifetime counter in
-// usage-store.js. AI+ subscribers spend from their monthly credit balance —
-// this operation costs CREDIT_COSTS.standard_redesign credits (1 by
-// default), configurable via env var without touching this file.
+// usage-store.js, AND are subject to a secondary IP-based ceiling
+// (lib/ip-abuse-guard.js) to blunt multi-account abuse. AI+ subscribers
+// spend from their monthly credit balance and are exempt from the IP check.
 
 const MAX_BYTES = 6 * 1024 * 1024;
 
@@ -111,6 +112,17 @@ module.exports = async function handler(req, res) {
     const isAiPlus = tier === 'ai_plus' && !!periodAnchor;
     const periodStart = isAiPlus ? computePeriodStart(periodAnchor) : null;
 
+    // Free-tier customers get a second check: has this IP already used up
+    // its shared free-design allowance, regardless of which customerId is
+    // asking? AI+ subscribers skip this entirely.
+    if (!isAiPlus) {
+      const ipBlocked = await isIpOverFreeLimit(req);
+      if (ipBlocked) {
+        res.status(403).json({ error: "You've used your free designs.", limitReached: true, tier: 'free' });
+        return;
+      }
+    }
+
     // Check BEFORE generating — never call OpenAI for a request we're going to reject anyway.
     const remainingBefore = isAiPlus
       ? await getCreditsRemaining(cleanCustomerId, periodStart)
@@ -144,6 +156,7 @@ module.exports = async function handler(req, res) {
       remaining = spendResult.remaining;
     } else {
       remaining = await recordGeneration(cleanCustomerId, FREE_LIMIT);
+      recordIpFreeUse(req).catch(() => {}); // best-effort, never blocks the response
     }
 
     recordToolUse('room-designer').catch(() => {});
