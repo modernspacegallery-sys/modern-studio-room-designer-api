@@ -193,6 +193,12 @@ module.exports = async function handler(req, res) {
     // gracefully a helper written for string input happens to handle a
     // non-string value.
     if (typeof redesignToken !== 'string') {
+      // Phase 4D.29B: minimal sanitized diagnostic log. Never logs the
+      // value itself (whatever a non-string redesignToken actually is --
+      // could be an object, number, boolean, null, array, etc.), only the
+      // fact that this branch was hit. No token, no body, no customerId,
+      // no headers, no IP, no requestId.
+      console.warn('redesign_token_rejected', { event: 'redesign_token_rejected', reason: 'non_string_token' });
       res.status(401).json({ error: 'Could not verify your session. Please refresh the page and try again.' });
       return;
     }
@@ -211,6 +217,16 @@ module.exports = async function handler(req, res) {
       // distinguishing verification failure reasons externally, and
       // keeping "missing secret" indistinguishable from any other token
       // failure rather than surfacing it as a separate 500.
+      // Phase 4D.29B: minimal sanitized diagnostic log -- logs ONLY the
+      // internal rejection reason string (one of the fixed, non-sensitive
+      // enum values consumeRedesignToken()/verifyRedesignToken() can
+      // return: secret_not_configured, malformed, bad_signature,
+      // invalid_lifetime, issued_in_future, excessive_lifetime, expired,
+      // already_consumed). Never logs the token, its payload, the nonce,
+      // any customerId, the signature, or anything else about the
+      // request. The HTTP response below is completely unchanged -- the
+      // browser still only ever sees the same generic 401 text.
+      console.warn('redesign_token_rejected', { event: 'redesign_token_rejected', reason: consumed.reason || 'unknown' });
       res.status(401).json({ error: 'Could not verify your session. Please refresh the page and try again.' });
       return;
     }
