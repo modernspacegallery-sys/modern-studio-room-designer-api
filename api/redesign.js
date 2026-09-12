@@ -10,6 +10,7 @@ const {
 const { checkRateLimit } = require('../lib/rate-limit');
 const { getEntitlement } = require('../lib/entitlement');
 const { verifyCustomerToken } = require('../lib/verify-customer-token');
+const { consumeRedesignToken } = require('../lib/redesign-token');
 const { recordToolUse } = require('../lib/tool-usage');
 const {
   computePeriodStart,
@@ -24,6 +25,7 @@ const { isIpOverFreeLimit, recordIpFreeUse } = require('../lib/ip-abuse-guard');
 const { claimOrReclaimRequestSlot, markRequestRecord } = require('../lib/reservation-ledger');
 
 // POST /api/redesign  { image, style, roomType, customerId, issuedAt, token, requestId? }
+//                   or { image, style, roomType, redesignToken, requestId? }
 // -> 200 { image: <data URL>, remaining, tier }
 // -> 200 { status: 'completed', alreadyProcessed: true, remaining, tier }  (requestId replay of a completed request)
 // -> 409 { error: 'already_processing' }  (requestId currently in flight elsewhere)
@@ -37,11 +39,38 @@ const { claimOrReclaimRequestSlot, markRequestRecord } = require('../lib/reserva
 // Phase 4D.25: the check-then-spend race across the ~30-60s OpenAI call is
 // closed with an atomic reserve-before-generate / commit-or-release pattern
 // (lib/reservation-ledger.js), so a failed generation -- or a process that
-// dies mid-request -- can never permanently consume an allowance unit. The
-// customerId/issuedAt/token auth mechanism and the existing response
-// contract for callers that don't send `requestId` (the live theme and the
-// unpublished theme today) are both unchanged; `requestId` is accepted but
-// optional, exactly as it was before this phase.
+// dies mid-request -- can never permanently consume an allowance unit.
+//
+// Phase 4D.27A: this route now accepts TWO mutually exclusive authentication
+// shapes on the same endpoint, during a migration window:
+//
+//   1. `redesignToken` (new, preferred) -- a short-lived, single-use,
+//      HMAC-signed token minted by the Shopify App Proxy route
+//      (api/proxy/redesign-token.js -> lib/redesign-token.js) from a
+//      Shopify-verified identity. Selection between the two paths is by
+//      PROPERTY PRESENCE on the request body, never by truthiness (Phase
+//      4D.27A.2): as soon as `redesignToken` is an own property of the
+//      body -- including "", whitespace, or a non-string value -- this
+//      path is AUTHORITATIVE. `consumeRedesignToken()` is the only thing
+//      that can produce a trusted customerId on this path, and ANY problem
+//      with the supplied value (wrong type, empty/whitespace, malformed,
+//      bad signature, expired, already consumed, secret not configured,
+//      etc.) is a hard 401 with NO fallback to the legacy fields below,
+//      even if the request also happens to include valid-looking
+//      `customerId`/`issuedAt`/`token` fields. This is a deliberate
+//      downgrade-prevention rule: a caller cannot send an empty, malformed,
+//      or reused redesignToken as a way to make legacy auth get tried
+//      instead.
+//   2. `customerId` + `issuedAt` + `token` (legacy, unchanged) -- the
+//      original theme-HMAC mechanism (lib/verify-customer-token.js). This
+//      path is used ONLY when the request supplies NO `redesignToken`
+//      property at all, and behaves exactly as it did before this phase.
+//
+// Everything downstream of authentication (requestId claim/replay,
+// entitlement lookup, IP guard, reservation, generation, commit/release)
+// operates on a single trusted `cleanCustomerId` regardless of which path
+// produced it, and is unchanged from Phase 4D.25/4D.26 logic. `requestId`
+// remains entirely optional, exactly as before.
 
 const MAX_BYTES = 6 * 1024 * 1024;
 
@@ -107,13 +136,13 @@ module.exports = async function handler(req, res) {
     return;
   }
 
-  const { image, style, roomType, customerId, issuedAt, token, requestId } = req.body || {};
+  const body = req.body || {};
+  const { image, style, roomType, customerId, issuedAt, token, requestId, redesignToken } = body;
 
-  const cleanCustomerId = String(customerId || '').trim();
-  if (!/^[0-9]{1,30}$/.test(cleanCustomerId)) {
-    res.status(400).json({ error: 'Invalid customerId.' });
-    return;
-  }
+  // Structural validation (image/style/requestId syntax) happens BEFORE any
+  // authentication -- a malformed request should never burn a single-use
+  // redesignToken or trip the legacy-auth path, exactly as it never
+  // consumed a reservation unit before this phase.
   if (!image || typeof image !== 'string' || !image.startsWith('data:image/')) {
     res.status(400).json({ error: 'Missing or invalid image.' });
     return;
@@ -138,9 +167,67 @@ module.exports = async function handler(req, res) {
     return;
   }
 
-  if (!verifyCustomerToken(cleanCustomerId, issuedAt, token)) {
-    res.status(401).json({ error: 'Could not verify your session. Please refresh the page and try again.' });
-    return;
+  // Authentication: exactly one of two mutually exclusive paths, selected by
+  // PROPERTY PRESENCE, never by truthiness (Phase 4D.27A.2 hardening).
+  //
+  //   - `redesignToken` PRESENT on the body (any own property, including an
+  //     empty string, whitespace, or a non-string value) -> the
+  //     redesign-token path is authoritative. ANY problem with the supplied
+  //     value -- wrong type, empty/whitespace, malformed, expired, already
+  //     consumed, bad signature, missing signing secret -- is a generic 401
+  //     with NO fallback to the legacy fields below, even when they are
+  //     also present and would otherwise verify successfully. Truthiness
+  //     ("" is falsy) must never be the gate here: a caller that explicitly
+  //     sent an empty/invalid redesignToken has declared intent to use the
+  //     new auth path, and an invalid value on that path must never be
+  //     reinterpreted as "didn't send one."
+  //   - `redesignToken` ABSENT (the property does not exist on the body at
+  //     all) -> the unchanged legacy customerId/issuedAt/token path runs,
+  //     exactly as it did before this phase.
+  const hasRedesignToken = Object.prototype.hasOwnProperty.call(body, 'redesignToken');
+  let cleanCustomerId;
+  if (hasRedesignToken) {
+    // Reject a non-string shape generically at the route boundary rather
+    // than forwarding it into the token helper -- lib/redesign-token.js is
+    // out of scope for this phase, and the route should not depend on how
+    // gracefully a helper written for string input happens to handle a
+    // non-string value.
+    if (typeof redesignToken !== 'string') {
+      res.status(401).json({ error: 'Could not verify your session. Please refresh the page and try again.' });
+      return;
+    }
+    // Deliberately NOT filtered by truthiness: an empty or whitespace-only
+    // string is still passed through (consumeRedesignToken's own malformed
+    // check rejects "" the same way it rejects any other invalid shape),
+    // so every invalid-value case reaches the identical generic-401 exit
+    // below rather than a special-cased one.
+    const cleanRedesignToken = redesignToken.trim();
+    const consumed = await consumeRedesignToken(cleanRedesignToken);
+    if (!consumed.ok) {
+      // Every failure reason (malformed, bad_signature, expired,
+      // already_consumed, secret_not_configured, invalid_lifetime,
+      // issued_in_future, excessive_lifetime) collapses to the same
+      // generic 401, matching the App Proxy routes' convention of never
+      // distinguishing verification failure reasons externally, and
+      // keeping "missing secret" indistinguishable from any other token
+      // failure rather than surfacing it as a separate 500.
+      res.status(401).json({ error: 'Could not verify your session. Please refresh the page and try again.' });
+      return;
+    }
+    // consumeRedesignToken()/verifyRedesignToken() already format-validated
+    // customerId against the same pattern used below, so no further check
+    // is needed here.
+    cleanCustomerId = consumed.customerId;
+  } else {
+    cleanCustomerId = String(customerId || '').trim();
+    if (!/^[0-9]{1,30}$/.test(cleanCustomerId)) {
+      res.status(400).json({ error: 'Invalid customerId.' });
+      return;
+    }
+    if (!verifyCustomerToken(cleanCustomerId, issuedAt, token)) {
+      res.status(401).json({ error: 'Could not verify your session. Please refresh the page and try again.' });
+      return;
+    }
   }
 
   // Cheap requestId dedupe check, before any entitlement/KV work for the
