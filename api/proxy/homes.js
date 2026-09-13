@@ -6,6 +6,7 @@
 // Behind STUDIO_CLOUD_PROJECTS_ENABLED; not live to any theme caller yet.
 
 const { gate } = require('../../lib/studio-cloud-auth');
+const { isStudioCloudProjectsWritesEnabled } = require('../../lib/studio-cloud-flag');
 const { checkRateLimit } = require('../../lib/rate-limit');
 const { checkStudioCloudCapability } = require('../../lib/studio-cloud-entitlement');
 const { validateHomeInput, ValidationError } = require('../../lib/validation/project-fields');
@@ -130,6 +131,14 @@ module.exports = async function handler(req, res) {
   try {
     if (req.method === 'GET') {
       await handleGet(req, res, customerId);
+      return;
+    }
+
+    // Phase 5D.2B: every POST op on this route is a mutation (create, edit,
+    // delete). Same write-rollout gate as api/proxy/projects.js -- see that
+    // file's comment. Blocks before entitlement and before Postgres.
+    if (!isStudioCloudProjectsWritesEnabled()) {
+      res.status(404).json({ error: 'not_found' });
       return;
     }
 
