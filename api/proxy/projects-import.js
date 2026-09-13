@@ -23,6 +23,7 @@
 // entry is skipped and counted, never aborts the batch (Section F.4).
 
 const { gate } = require('../../lib/studio-cloud-auth');
+const { isStudioCloudProjectsWritesEnabled } = require('../../lib/studio-cloud-flag');
 const { checkRateLimit } = require('../../lib/rate-limit');
 const { checkStudioCloudCapability } = require('../../lib/studio-cloud-entitlement');
 const { validateProjectInput, validateHomeInput, requireNonEmptyString, ValidationError } = require('../../lib/validation/project-fields');
@@ -51,6 +52,15 @@ module.exports = async function handler(req, res) {
   const gated = gate(req, res);
   if (!gated.ok) return;
   const { customerId } = gated;
+
+  // Phase 5D.2B: import is entirely a mutation (bulk create). Gate it here,
+  // before entitlement and before any repository/Postgres call below --
+  // same write-rollout flag and same fail-closed response as
+  // api/proxy/projects.js and api/proxy/homes.js.
+  if (!isStudioCloudProjectsWritesEnabled()) {
+    res.status(404).json({ error: 'not_found' });
+    return;
+  }
 
   const cap = await checkStudioCloudCapability(customerId, 'import');
   if (!cap.allowed) {

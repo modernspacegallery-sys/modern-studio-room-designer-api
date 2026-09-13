@@ -9,6 +9,12 @@
 
 process.env.SHOPIFY_STUDIO_PROXY_CLIENT_SECRET = 'test-proxy-client-secret-not-real';
 process.env.STUDIO_CLOUD_PROJECTS_ENABLED = 'true';
+// Phase 5D.2B added a second, independent write-rollout flag (see
+// lib/studio-cloud-flag.js). This suite predates it and exercises full
+// Phase 5C read+write behavior, so it turns writes on here to keep that
+// behavior asserted unchanged. The write-rollout flag's own on/off/absent
+// semantics are covered separately in test/studio-cloud-write-rollout.test.js.
+process.env.STUDIO_CLOUD_PROJECTS_WRITES_ENABLED = 'true';
 
 const Module = require('module');
 const test = require('node:test');

@@ -15,6 +15,7 @@
 // live to any customer traffic.
 
 const { gate } = require('../../lib/studio-cloud-auth');
+const { isStudioCloudProjectsWritesEnabled } = require('../../lib/studio-cloud-flag');
 const { checkRateLimit } = require('../../lib/rate-limit');
 const { checkStudioCloudCapability } = require('../../lib/studio-cloud-entitlement');
 const { validateProjectInput, ValidationError } = require('../../lib/validation/project-fields');
@@ -197,6 +198,18 @@ module.exports = async function handler(req, res) {
   try {
     if (req.method === 'GET') {
       await handleGet(req, res, customerId);
+      return;
+    }
+
+    // Phase 5D.2B: every POST op on this route is a mutation (create, edit,
+    // attach, assign, delete). Gate them all here, in one place, before
+    // dispatch -- so a write-rollout-off request never reaches entitlement
+    // (checkStudioCloudCapability) or the repositories (Postgres) below.
+    // Same fail-closed, non-disclosing response shape as the master flag in
+    // lib/studio-cloud-auth.js's gate(): a real caller cannot tell "writes
+    // disabled" apart from "route does not exist."
+    if (!isStudioCloudProjectsWritesEnabled()) {
+      res.status(404).json({ error: 'not_found' });
       return;
     }
 
