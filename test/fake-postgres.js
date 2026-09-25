@@ -24,12 +24,21 @@ function createFakePostgres() {
     projects = new Map();
   }
 
+  // Phase 6B (F7): the real UNIQUE (customer_id, client_legacy_id) constraint
+  // has no "WHERE deleted_at IS NULL", so it also covers soft-deleted rows.
+  // findHomeByLegacy mirrors the CONSTRAINT (any row); findActiveHomeByLegacy
+  // mirrors queries that filter deleted_at IS NULL.
   function findHomeByLegacy(customerId, clientLegacyId) {
     if (!clientLegacyId) return undefined;
     for (const row of homes.values()) {
-      if (row.customer_id === customerId && row.client_legacy_id === clientLegacyId && !row.deleted_at) return row;
+      if (row.customer_id === customerId && row.client_legacy_id === clientLegacyId) return row;
     }
     return undefined;
+  }
+
+  function findActiveHomeByLegacy(customerId, clientLegacyId) {
+    const row = findHomeByLegacy(customerId, clientLegacyId);
+    return row && !row.deleted_at ? row : undefined;
   }
 
   function findProjectByLegacy(customerId, clientLegacyId) {
@@ -44,7 +53,22 @@ function createFakePostgres() {
     return row ? { ...row } : row;
   }
 
+  // Phase 6B: every query name is logged so tests can prove that a dry run
+  // issues no INSERT/UPDATE/DELETE (see test/studio-cloud-import-6b.test.js).
+  const queryLog = [];
+  // Phase 6B: inject one non-validation failure: the (skip+1)-th query named `name` throws.
+  const faults = [];
+
   async function query({ name, text, values }) {
+    queryLog.push(name || (text || '').trim().split(/\s+/).slice(0, 2).join(' '));
+    if (faults.length && faults[0].name === name) {
+      const f = faults[0];
+      f.skip -= 1;
+      if (f.skip < 0) {
+        faults.shift();
+        throw new Error('fake-postgres: injected fault on ' + name);
+      }
+    }
     switch (name) {
       case 'homes_insert': {
         const [customerId, clientLegacyId, homeName] = values;
@@ -69,7 +93,7 @@ function createFakePostgres() {
       }
 
       case 'homes_import_insert': {
-        const [customerId, clientLegacyId, homeName] = values;
+        const [customerId, clientLegacyId, homeName, createdAt, updatedAt] = values;
         if (findHomeByLegacy(customerId, clientLegacyId)) {
           return { rows: [] }; // ON CONFLICT DO NOTHING
         }
@@ -80,8 +104,8 @@ function createFakePostgres() {
           name: homeName,
           schema_version: 1,
           version: 1,
-          created_at: new Date(),
-          updated_at: new Date(),
+          created_at: createdAt ? new Date(createdAt) : new Date(),
+          updated_at: updatedAt ? new Date(updatedAt) : new Date(),
           deleted_at: null,
         };
         homes.set(row.id, row);
@@ -99,8 +123,26 @@ function createFakePostgres() {
 
       case 'homes_get_by_client_legacy_id': {
         const [customerId, clientLegacyId] = values;
-        const row = findHomeByLegacy(customerId, clientLegacyId);
+        const row = findActiveHomeByLegacy(customerId, clientLegacyId);
         return { rows: row ? [cloneRow(row)] : [] };
+      }
+
+      case 'homes_find_by_client_legacy_ids': {
+        const [customerId, ids] = values;
+        const want = new Set(ids);
+        const rows = [...homes.values()]
+          .filter((r) => r.customer_id === customerId && want.has(r.client_legacy_id))
+          .map((r) => ({ id: r.id, client_legacy_id: r.client_legacy_id, deleted_at: r.deleted_at }));
+        return { rows };
+      }
+
+      case 'projects_find_by_client_legacy_ids': {
+        const [customerId, ids] = values;
+        const want = new Set(ids);
+        const rows = [...projects.values()]
+          .filter((r) => r.customer_id === customerId && want.has(r.client_legacy_id))
+          .map((r) => ({ id: r.id, client_legacy_id: r.client_legacy_id, home_id: r.home_id, deleted_at: r.deleted_at }));
+        return { rows };
       }
 
       case 'homes_list_for_customer': {
@@ -180,7 +222,7 @@ function createFakePostgres() {
       }
 
       case 'projects_import_insert': {
-        const [customerId, clientLegacyId, homeId, projName, room, roomLabel, moodBoard, spacePlan] = values;
+        const [customerId, clientLegacyId, homeId, projName, room, roomLabel, moodBoard, spacePlan, createdAt, updatedAt] = values;
         if (findProjectByLegacy(customerId, clientLegacyId)) {
           return { rows: [] };
         }
@@ -197,8 +239,8 @@ function createFakePostgres() {
           space_plan: spacePlan ? JSON.parse(spacePlan) : null,
           schema_version: 1,
           version: 1,
-          created_at: new Date(),
-          updated_at: new Date(),
+          created_at: createdAt ? new Date(createdAt) : new Date(),
+          updated_at: updatedAt ? new Date(updatedAt) : new Date(),
           deleted_at: null,
         };
         projects.set(row.id, row);
@@ -302,7 +344,18 @@ function createFakePostgres() {
     }
   }
 
-  return { query, withTransaction, reset, _debug: { homes, projects } };
+  return {
+    query,
+    withTransaction,
+    reset,
+    _debug: { homes, projects },
+    // Phase 6B test helpers (live views; `_debug` keeps its original shape).
+    queryLog,
+    injectFault(name, skip = 0) { faults.push({ name, skip }); },
+    allRows() {
+      return { homes: [...homes.values()].map(cloneRow), projects: [...projects.values()].map(cloneRow) };
+    },
+  };
 }
 
 module.exports = { createFakePostgres };

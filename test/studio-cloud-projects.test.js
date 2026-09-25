@@ -423,7 +423,9 @@ test('import: first import creates homes and projects, resolving homeId referenc
     projects: [{ id: 'local-proj-1', homeId: 'local-home-1', name: 'Bedroom', room: 'bedroom' }],
   });
   assert.equal(res.statusCode, 200);
-  assert.deepEqual(res.body, { importedProjects: 1, importedHomes: 1, skippedProjects: 0, skippedHomes: 0 });
+  // Phase 6B added per-record results alongside these counts; the counts are unchanged.
+  const { importedProjects, importedHomes, skippedProjects, skippedHomes } = res.body;
+  assert.deepEqual({ importedProjects, importedHomes, skippedProjects, skippedHomes }, { importedProjects: 1, importedHomes: 1, skippedProjects: 0, skippedHomes: 0 });
 
   const projects = (await get(projectsHandler, cust)).body.projects;
   assert.equal(projects.length, 1);
@@ -439,7 +441,11 @@ test('import: retrying the identical import reports 0 imported, N skipped, no du
   };
   await post(importHandler, cust, payload);
   const second = await post(importHandler, cust, payload);
-  assert.deepEqual(second.body, { importedProjects: 0, importedHomes: 0, skippedProjects: 1, skippedHomes: 1 });
+  // Phase 6B added per-record results alongside these counts; the counts are unchanged.
+  const { importedProjects, importedHomes, skippedProjects, skippedHomes } = second.body;
+  assert.deepEqual({ importedProjects, importedHomes, skippedProjects, skippedHomes }, { importedProjects: 0, importedHomes: 0, skippedProjects: 1, skippedHomes: 1 });
+  assert.deepEqual(second.body.projects.map((r) => r.status), ['already_imported']);
+  assert.deepEqual(second.body.homes.map((r) => r.status), ['already_imported']);
 
   const projects = (await get(projectsHandler, cust)).body.projects;
   assert.equal(projects.length, 1); // still just the one, no duplicate
