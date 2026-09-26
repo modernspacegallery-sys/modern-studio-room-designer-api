@@ -24,8 +24,13 @@
 //   { dryRun?: boolean, planVersion?: integer,
 //     plannedHomes?: [{ id, name }]            (dryRun only, <= 200, unique ids)
 //     homes:    [{ id, name, createdAt?, updatedAt?, datePreference? }]
-//     projects: [{ id, homeId?, name, room, roomLabel?, moodBoard?, spacePlan?,
+//     projects: [{ id, homeId, name, room, roomLabel?, moodBoard?, spacePlan?,
 //                  createdAt?, updatedAt?, datePreference? }] }
+//   `homeId` is REQUIRED on every Project entry: a local Home id (string) or
+//   an explicit null for "no Home". An omitted homeId makes that one entry
+//   `invalid` with field "homeId" (nothing inserted for it; the rest of the
+//   batch is unaffected), so a Project can never be imported ungrouped by
+//   accident.
 //   `id` on each entry is the browser-generated local id -- stored as
 //   client_legacy_id, NEVER used as the server id.
 //
@@ -105,8 +110,12 @@ function validateHomeEntry(entry, now) {
 // BEFORE field validation, so an unreadable savedAt never rejects a Project.
 function validateProjectEntry(entry, now) {
   const legacyId = legacyIdOf(entry, 'project');
+  // Required property: a missing key is never read as "no Home".
+  if (!Object.prototype.hasOwnProperty.call(entry, 'homeId') || entry.homeId === undefined) {
+    throw new ValidationError('homeId is required on every Project: a local Home id or null.', 'homeId');
+  }
   let homeId = null;
-  if (entry.homeId !== undefined && entry.homeId !== null) {
+  if (entry.homeId !== null) {
     homeId = requireNonEmptyString(entry.homeId, 'homeId', MAX_LEGACY_ID_LENGTH);
   }
   const datePreference = validateDatePreference(entry);

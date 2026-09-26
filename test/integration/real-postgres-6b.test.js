@@ -191,6 +191,28 @@ if (!process.env.POSTGRES_URL) {
     assert.equal((await counts(c)).homes, 1);
   });
 
+  test('PG-11 (B-H) omitted homeId: invalid in preview and real import, nothing inserted for it; the rest of the batch commits', async () => {
+    const c = await customer();
+    const omitted = { id: 'p-omit', name: 'No key', room: 'bedroom' };
+    const w0 = await totalWritesCommitted();
+    const d = await dry(c, { plannedHomes: [H1], homes: [], projects: [P('p-null', null), omitted, P('p-link', H1.id)] });
+    assert.equal(d.statusCode, 200);
+    const ds = Object.fromEntries(d.body.projects.map((r) => [r.legacyId, r]));
+    assert.equal(ds['p-omit'].status, 'invalid');
+    assert.equal(ds['p-omit'].field, 'homeId');
+    assert.equal(ds['p-null'].status, 'would_import');
+    assert.equal(ds['p-link'].homeLink, 'would_link_planned');
+    assert.deepEqual(await counts(c), { homes: 0, projects: 0 });
+    assert.equal(await totalWritesCommitted(), w0, 'preview wrote nothing');
+    const r = await post(c, { homes: [H1], projects: [P('p-null', null), omitted, P('p-link', H1.id)] });
+    const rs = Object.fromEntries(r.body.projects.map((x) => [x.legacyId, x]));
+    assert.equal(rs['p-omit'].status, 'invalid');
+    assert.equal(rs['p-omit'].field, 'homeId');
+    assert.equal(rs['p-null'].status, 'imported');
+    assert.equal(rs['p-link'].status, 'imported');
+    assert.deepEqual(await counts(c), { homes: 1, projects: 2 });
+  });
+
   test.after(async () => {
     await db.getPool().end();
   });

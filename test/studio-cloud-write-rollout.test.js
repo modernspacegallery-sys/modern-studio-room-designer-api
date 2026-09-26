@@ -290,7 +290,7 @@ test('blocked writes do not call Postgres (no fakePg.query invocation happens)',
 
   const importRes = await post(importHandler, cust, {
     homes: [{ id: 'h1', name: 'House' }],
-    projects: [{ id: 'p1', name: 'Room', room: 'bedroom' }],
+    projects: [{ id: 'p1', homeId: null, name: 'Room', room: 'bedroom' }],
   });
   assert.equal(importRes.statusCode, 404);
   assert.equal(pgQueryCalls, 0);

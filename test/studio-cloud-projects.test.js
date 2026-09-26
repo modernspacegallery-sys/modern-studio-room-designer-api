@@ -457,9 +457,9 @@ test('import: one malformed entry among valid ones is skipped, valid ones still 
   const res = await post(importHandler, cust, {
     homes: [],
     projects: [
-      { id: 'good-1', name: 'Good Room', room: 'bedroom' },
-      { id: 'bad-1', name: 'Bad Room', room: 'not-a-real-room' }, // invalid room
-      { id: 'good-2', name: 'Good Room 2', room: 'kitchen' },
+      { id: 'good-1', homeId: null, name: 'Good Room', room: 'bedroom' },
+      { id: 'bad-1', homeId: null, name: 'Bad Room', room: 'not-a-real-room' }, // invalid room
+      { id: 'good-2', homeId: null, name: 'Good Room 2', room: 'kitchen' },
     ],
   });
   assert.equal(res.statusCode, 200);
@@ -470,7 +470,10 @@ test('import: one malformed entry among valid ones is skipped, valid ones still 
 test('import: isolation -- importing as customer A never creates rows visible to customer B', async () => {
   const a = '604', b = '605';
   await asAiPlus(a); await asAiPlus(b);
-  await post(importHandler, a, { homes: [], projects: [{ id: 'p1', name: 'Room', room: 'bedroom' }] });
+  const imp = await post(importHandler, a, { homes: [], projects: [{ id: 'p1', homeId: null, name: 'Room', room: 'bedroom' }] });
+  assert.equal(imp.body.importedProjects, 1, 'the import itself must succeed for this check to mean anything');
+  const aList = await get(projectsHandler, a);
+  assert.equal(aList.body.projects.length, 1);
   const bList = await get(projectsHandler, b);
   assert.equal(bList.body.projects.length, 0);
 });

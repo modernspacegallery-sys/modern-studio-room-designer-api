@@ -392,7 +392,7 @@ test('B-D1..D3 statuses are distinct and counts match', async () => {
   await post(c, { homes: [], projects: [P('pd', null), P('pa', null)] });
   const pd = rowsFor(c).projects.find((r) => r.client_legacy_id === 'pd');
   await call(projectsHandler, c, 'POST', { op: 'delete', id: pd.id, version: pd.version });
-  const body = { homes: [], projects: [P('pd', null), P('pa', null), P('pn', null), { id: 'pi', name: 'Bad', room: 'nope' }] };
+  const body = { homes: [], projects: [P('pd', null), P('pa', null), P('pn', null), { id: 'pi', homeId: null, name: 'Bad', room: 'nope' }] };
   const d = await dryNoWrites(c, body);
   const r = await post(c, body);
   const ds = byId(d.body.projects);
@@ -556,4 +556,66 @@ test('response never echoes submitted field values in `field`, and never contain
   const text = JSON.stringify(r.body);
   assert.ok(!text.includes('SECRET-NAME'));
   assert.ok(!/customer_?id/i.test(text));
+});
+
+// ---------------------------------------------------------------------------
+// B-H: homeId is a REQUIRED property (a local Home id or explicit null)
+// ---------------------------------------------------------------------------
+
+test('B-H1 preview: omitted homeId -> that entry invalid (field homeId); the rest of the batch previews normally; zero writes', async () => {
+  const c = await newCustomer();
+  const omitted = { id: 'p-omit', name: 'No key', room: 'bedroom' };
+  const res = await dryNoWrites(c, { plannedHomes: [H1], homes: [], projects: [P('p-null', null), omitted, P('p-link', H1.id)] });
+  const r = byId(res.body.projects);
+  assert.equal(r['p-omit'].status, 'invalid');
+  assert.equal(r['p-omit'].field, 'homeId');
+  assert.equal(r['p-null'].status, 'would_import');
+  assert.equal(r['p-null'].homeLink, 'none');
+  assert.equal(r['p-link'].status, 'would_import');
+  assert.equal(r['p-link'].homeLink, 'would_link_planned');
+  assert.equal(res.body.projects.length, 3);
+});
+
+test('B-H2 real import: omitted homeId -> invalid, nothing inserted for it; explicit null and linked entries still import', async () => {
+  const c = await newCustomer();
+  const omitted = { id: 'p-omit', name: 'No key', room: 'bedroom' };
+  const res = await post(c, { homes: [H1], projects: [P('p-null', null), omitted, P('p-link', H1.id)] });
+  assert.equal(res.statusCode, 200);
+  const r = byId(res.body.projects);
+  assert.equal(r['p-omit'].status, 'invalid');
+  assert.equal(r['p-omit'].field, 'homeId');
+  assert.equal(r['p-null'].status, 'imported');
+  assert.equal(r['p-link'].status, 'imported');
+  assert.equal(res.body.importedProjects, 2);
+  assert.equal(res.body.skippedProjects, 1);
+  const rows = rowsFor(c);
+  assert.equal(rows.projects.length, 2);
+  assert.ok(!rows.projects.some((p) => p.client_legacy_id === 'p-omit'), 'omitted-homeId entry must not be inserted');
+  const home = rows.homes.find((h) => h.client_legacy_id === H1.id);
+  assert.equal(rows.projects.find((p) => p.client_legacy_id === 'p-null').home_id, null);
+  assert.equal(rows.projects.find((p) => p.client_legacy_id === 'p-link').home_id, home.id);
+});
+
+test('B-H3 omitted homeId is invalid even when the Project was imported before (validation runs first; no silent success)', async () => {
+  const c = await newCustomer();
+  await post(c, { homes: [], projects: [P('p1', null)] });
+  const d = await dryNoWrites(c, { homes: [], projects: [{ id: 'p1', name: 'Room p1', room: 'bedroom' }] });
+  assert.equal(d.body.projects[0].status, 'invalid');
+  assert.equal(d.body.projects[0].field, 'homeId');
+  const r = await post(c, { homes: [], projects: [{ id: 'p1', name: 'Room p1', room: 'bedroom' }] });
+  assert.equal(r.body.projects[0].status, 'invalid');
+  assert.equal(rowsFor(c).projects.length, 1, 'still exactly one row');
+});
+
+test('B-H4 homeId present but not a string or null (number, empty string) -> invalid homeId; explicit null is valid', async () => {
+  const c = await newCustomer();
+  const res = await dryNoWrites(c, { homes: [], projects: [
+    { id: 'p-num', homeId: 7, name: 'A', room: 'bedroom' },
+    { id: 'p-empty', homeId: '', name: 'B', room: 'bedroom' },
+    { id: 'p-null', homeId: null, name: 'C', room: 'bedroom' },
+  ] });
+  const r = byId(res.body.projects);
+  assert.equal(r['p-num'].status, 'invalid'); assert.equal(r['p-num'].field, 'homeId');
+  assert.equal(r['p-empty'].status, 'invalid'); assert.equal(r['p-empty'].field, 'homeId');
+  assert.equal(r['p-null'].status, 'would_import');
 });
