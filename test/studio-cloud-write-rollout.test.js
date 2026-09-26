@@ -290,7 +290,7 @@ test('blocked writes do not call Postgres (no fakePg.query invocation happens)',
 
   const importRes = await post(importHandler, cust, {
     homes: [{ id: 'h1', name: 'House' }],
-    projects: [{ id: 'p1', name: 'Room', room: 'bedroom' }],
+    projects: [{ id: 'p1', homeId: null, name: 'Room', room: 'bedroom' }],
   });
   assert.equal(importRes.statusCode, 404);
   assert.equal(pgQueryCalls, 0);
@@ -344,5 +344,7 @@ test('master on + writes on: import behaves exactly as Phase 5C', async () => {
     projects: [{ id: 'local-proj-1', homeId: 'local-home-1', name: 'Bedroom', room: 'bedroom' }],
   });
   assert.equal(res.statusCode, 200);
-  assert.deepEqual(res.body, { importedProjects: 1, importedHomes: 1, skippedProjects: 0, skippedHomes: 0 });
+  // Phase 6B added per-record results alongside these counts; the counts are unchanged.
+  const { importedProjects, importedHomes, skippedProjects, skippedHomes } = res.body;
+  assert.deepEqual({ importedProjects, importedHomes, skippedProjects, skippedHomes }, { importedProjects: 1, importedHomes: 1, skippedProjects: 0, skippedHomes: 0 });
 });
