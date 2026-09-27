@@ -37,7 +37,8 @@ async function handleGet(req, res, customerId) {
     return;
   }
   const homes = await homesRepo.listHomesForCustomer(customerId);
-  res.status(200).json({ homes: homes.map(serializeHome) });
+  // Phase 6B #3: same account-saving status as the Projects list reply.
+  res.status(200).json({ homes: homes.map(serializeHome), writesEnabled: isStudioCloudProjectsWritesEnabled() });
 }
 
 async function handleCreate(req, res, customerId, body) {

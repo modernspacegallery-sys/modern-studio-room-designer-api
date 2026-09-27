@@ -508,5 +508,6 @@ test('feature flag: missing entirely -> defaults to OFF (fail closed)', async ()
 test('feature flag: on -> route behaves normally', async () => {
   const res = await get(projectsHandler, '703');
   assert.equal(res.statusCode, 200); // authenticated, flag on, empty list
-  assert.deepEqual(res.body, { projects: [] });
+  // Phase 6B #3: list replies also carry the account-saving status (this file runs with writes on).
+  assert.deepEqual(res.body, { projects: [], writesEnabled: true });
 });

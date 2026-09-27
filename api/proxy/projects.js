@@ -56,7 +56,11 @@ async function handleGet(req, res, customerId) {
   }
 
   const projects = await projectsRepo.listProjectsForCustomer(customerId);
-  res.status(200).json({ projects: projects.map(serializeProject) });
+  // Phase 6B #3: the list also says whether account saving is on, so the
+  // theme can keep new work on the device (and never attempt an account
+  // write) while writes are off. Only the signed-in customer's own list
+  // reply carries it; single-record reads and every write are unchanged.
+  res.status(200).json({ projects: projects.map(serializeProject), writesEnabled: isStudioCloudProjectsWritesEnabled() });
 }
 
 async function handleCreate(req, res, customerId, body) {
@@ -206,8 +210,10 @@ module.exports = async function handler(req, res) {
     // dispatch -- so a write-rollout-off request never reaches entitlement
     // (checkStudioCloudCapability) or the repositories (Postgres) below.
     // Same fail-closed, non-disclosing response shape as the master flag in
-    // lib/studio-cloud-auth.js's gate(): a real caller cannot tell "writes
-    // disabled" apart from "route does not exist."
+    // lib/studio-cloud-auth.js's gate(). Phase 6B #3: signed-in callers can
+    // now learn the write status from the list replies (writesEnabled), so
+    // the theme never attempts a write while it is off; this 404 remains
+    // the enforcement.
     if (!isStudioCloudProjectsWritesEnabled()) {
       res.status(404).json({ error: 'not_found' });
       return;
