@@ -185,11 +185,12 @@ test('reads: master on, writes off -> listProjects, getProject, listHomes all su
 
   const list = await get(projectsHandler, cust);
   assert.equal(list.statusCode, 200);
-  assert.deepEqual(list.body, { projects: [] });
+  // Phase 6B #3: list replies report writes off.
+  assert.deepEqual(list.body, { projects: [], writesEnabled: false });
 
   const homesList = await get(homesHandler, cust);
   assert.equal(homesList.statusCode, 200);
-  assert.deepEqual(homesList.body, { homes: [] });
+  assert.deepEqual(homesList.body, { homes: [], writesEnabled: false });
 });
 
 test('reads: master on, writes absent (unset) -> same as writes off, reads still succeed', async () => {
